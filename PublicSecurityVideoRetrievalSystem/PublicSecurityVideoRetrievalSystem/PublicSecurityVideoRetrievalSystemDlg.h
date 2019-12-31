@@ -3,7 +3,11 @@
 //
 
 #pragma once
+#include "afxcmn.h"
+#include <vector>
+#include <iostream>
 
+using namespace std;
 
 // CPublicSecurityVideoRetrievalSystemDlg dialog
 class CPublicSecurityVideoRetrievalSystemDlg : public CDialogEx
@@ -11,7 +15,7 @@ class CPublicSecurityVideoRetrievalSystemDlg : public CDialogEx
 // Construction
 public:
 	CPublicSecurityVideoRetrievalSystemDlg(CWnd* pParent = NULL);	// standard constructor
-
+	CString filePath;
 // Dialog Data
 	enum { IDD = IDD_PUBLICSECURITYVIDEORETRIEVALSYSTEM_DIALOG };
 
@@ -29,4 +33,8 @@ protected:
 	afx_msg void OnPaint();
 	afx_msg HCURSOR OnQueryDragIcon();
 	DECLARE_MESSAGE_MAP()
+
+public:
+//	afx_msg void OnSetpath();
+	CTreeCtrl fileTree;
 };

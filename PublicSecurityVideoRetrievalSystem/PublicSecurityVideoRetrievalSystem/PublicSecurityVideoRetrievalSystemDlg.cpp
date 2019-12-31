@@ -13,7 +13,6 @@
 
 
 // CAboutDlg dialog used for App About
-
 class CAboutDlg : public CDialogEx
 {
 public:
@@ -56,12 +55,14 @@ CPublicSecurityVideoRetrievalSystemDlg::CPublicSecurityVideoRetrievalSystemDlg(C
 void CPublicSecurityVideoRetrievalSystemDlg::DoDataExchange(CDataExchange* pDX)
 {
 	CDialogEx::DoDataExchange(pDX);
+	DDX_Control(pDX, IDC_TREE2FilePath, fileTree);
 }
 
 BEGIN_MESSAGE_MAP(CPublicSecurityVideoRetrievalSystemDlg, CDialogEx)
 	ON_WM_SYSCOMMAND()
 	ON_WM_PAINT()
 	ON_WM_QUERYDRAGICON()
+//	ON_COMMAND(ID_SETPATH, &CPublicSecurityVideoRetrievalSystemDlg::OnSetpath)
 END_MESSAGE_MAP()
 
 
@@ -97,6 +98,42 @@ BOOL CPublicSecurityVideoRetrievalSystemDlg::OnInitDialog()
 	SetIcon(m_hIcon, FALSE);		// Set small icon
 
 	// TODO: Add extra initialization here
+	//添加位置对树的设置
+	this->filePath = _T("C:/Users/76008/Desktop/test/");
+	CFileFind find;
+	CString fileName = _T("");
+	vector<CString> fullName;
+	BOOL IsFind = find.FindFile(this->filePath + _T("/*.*"));
+	while (IsFind)
+	{
+		IsFind = find.FindNextFile();
+		if (find.IsDots())
+		{
+			continue;
+		}
+		else
+		{
+			fileName = find.GetFileName();
+			fullName.push_back(fileName);
+		}
+	}
+	//遍历
+	HTREEITEM hRoot,secondRoot;
+	hRoot = this->fileTree.InsertItem(_T("test"), TVI_ROOT);
+	vector<CString>::iterator iter;
+	for (iter = fullName.begin(); iter != fullName.end(); ++iter)
+	{
+		//判断是否包含. 用来判断是否是文件夹
+		if ((*iter).Find('.')!=NULL)
+		{
+			this->fileTree.InsertItem((*iter), hRoot);
+		}
+		else
+		{
+			secondRoot = this->fileTree.InsertItem((*iter), hRoot);
+		}
+	}
+	
 
 	return TRUE;  // return TRUE  unless you set the focus to a control
 }
@@ -149,4 +186,6 @@ HCURSOR CPublicSecurityVideoRetrievalSystemDlg::OnQueryDragIcon()
 {
 	return static_cast<HCURSOR>(m_hIcon);
 }
+
+
 
