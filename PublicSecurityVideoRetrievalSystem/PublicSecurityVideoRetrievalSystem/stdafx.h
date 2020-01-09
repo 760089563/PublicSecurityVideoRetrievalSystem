@@ -37,9 +37,6 @@
 
 
 
-
-
-
 #ifdef __cplusplus
 extern "C"
 {
@@ -52,8 +49,13 @@ extern "C"
 #include "libswresample/swresample.h"
 #include "libswscale/swscale.h"
 #include "libavutil/avutil.h"
+#include "libavutil/imgutils.h"
+#include <libavutil/time.h>
 
-#include "SDL.h"
+#include <SDL.h>
+#include "SDL_video.h"
+#include "SDL_render.h"
+#include "SDL_rect.h"
 
 #ifdef __cplusplus
 }

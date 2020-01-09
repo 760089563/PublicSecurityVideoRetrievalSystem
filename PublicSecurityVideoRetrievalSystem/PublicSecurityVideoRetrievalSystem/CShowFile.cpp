@@ -28,6 +28,7 @@ BEGIN_MESSAGE_MAP(CShowFile, CFormView)
 //	ON_BN_CLICKED(IDC_BUTTON1, &CShowFile::OnBnClickedShowPicture)
 ON_WM_MOUSEWHEEL()
 ON_WM_KEYDOWN()
+// ON_STN_CLICKED(IDC_STATIC_PIC, &CShowFile::OnStnClickedStaticPic)
 END_MESSAGE_MAP()
 
 
@@ -51,7 +52,8 @@ void CShowFile::Dump(CDumpContext& dc) const
 //返回主要的窗口句柄
 CWnd* CShowFile::GetMainFrameWnd()
 {
-	return this->GetDlgItem(IDC_STATIC_PIC);
+	//CWnd* temp = this->GetDlgItem(IDC_STATIC_PIC);
+	return this;
 }
 
 //鼠标滚轮事件实现放大缩小的操作
@@ -100,12 +102,12 @@ void CShowFile::Init()
 
 //进行内存回收防止泄露
 void CShowFile::Destroy() {
-	if (imageControl==NULL)
+	if (imageControl!=NULL)
 	{
 		delete imageControl;
 		imageControl = NULL;
 	}
-	if (videoControl==NULL)
+	if (videoControl!=NULL)
 	{
 		delete videoControl;
 		videoControl = NULL;
@@ -121,13 +123,13 @@ void CShowFile::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 		switch (nChar)
 		{
 		case VK_SPACE:		//判断是否按下空格键
-			videoControl->isPause = !videoControl->isPause;
+			videoControl->SetPlayType(EM_PLAY_TYPE_PAUSE);
 			break;
 		case VK_LEFT:		//判断是否按下左箭头
-			videoControl->isBack = true;
+			//videoControl->isBack = true;
 			break;
 		case VK_RIGHT:		//判断是否按下右箭头
-			videoControl->isForward = true;
+			//videoControl->isForward = true;
 			break;
 		default:
 			break;
@@ -135,3 +137,9 @@ void CShowFile::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 	}
 	CFormView::OnKeyDown(nChar, nRepCnt, nFlags);
 }
+
+
+//void CShowFile::OnStnClickedStaticPic()
+//{
+//	// TODO: 在此添加控件通知处理程序代码
+//}

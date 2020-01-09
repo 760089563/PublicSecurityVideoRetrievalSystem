@@ -1,156 +1,131 @@
 #pragma once
 
 #include "stdafx.h"
-#include <stdbool.h>
 #include <stdio.h>
-#include <assert.h>
-#include <math.h>
-extern "C"
+
+
+#include <atomic>
+#include "afxwin.h"
+#include "afxcmn.h"
+#include <queue>
+#include <list>
+#include <mutex>
+
+using std::queue;
+using std::list;
+using std::mutex;
+
+#define LOCK_MUTEX(X)	WaitForSingleObject(X, INFINITE); 
+#define UNLOCK_MUTEX(X)	ReleaseMutex(X); 
+
+#define  WM_SHOW_BK WM_USER+10 //显示默认背景消息
+#define  WM_UPDATE_SLIDER WM_USER+11 //更新进度条消息
+#define  WM_ERROR_MSG WM_USER+12 //错误消息
+#define  MAX_VQUEUE 300 //图片帧队列饱和值
+
+//错误类型
+enum EM_ERROR_TYPE
 {
-#include <SDL.h>
-#include "SDL_video.h"
-#include "SDL_render.h"
-#include "SDL_rect.h"
+	EM_SEND_PACKET_ERROR,
+	EM_AVCODE_OPEN_ERROR,
+	EM_SDL_OPENAUDIO_ERROR,
+	EM_ERROR_MAX
 
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libswscale/swscale.h>
-#include <libavutil/time.h>
-#include <libswresample/swresample.h>
-#include "libavutil/imgutils.h"
+};
 
-}
+//播放状态
+enum EM_PLAY_TYPE
+{
+	EM_PLAY_TYPE_PLAY,//播放
+	EM_PLAY_TYPE_PAUSE,//暂停
+	EM_PLAY_TYPE_STOP,//停止
+	EM_PLAY_TYPE_MAX
+};
 
-#define SDL_AUDIO_BUFFER_SIZE 1024
-#define MAX_AUDIO_FRAME_SIZE 192000 //channels(2) * data_size(2) * sample_rate(48000)
-
-#define MAX_AUDIOQ_SIZE (5 * 16 * 1024)
-#define MAX_VIDEOQ_SIZE (5 * 256 * 1024)
-
-#define AV_SYNC_THRESHOLD 0.01
-#define AV_NOSYNC_THRESHOLD 10.0
-
-#define FF_REFRESH_EVENT (SDL_USEREVENT)
-#define FF_QUIT_EVENT (SDL_USEREVENT + 1)
-
-#define VIDEO_PICTURE_QUEUE_SIZE 1
-
-typedef struct PacketQueue {
-	AVPacketList *first_pkt, *last_pkt;
-	int nb_packets;
-	int size;
-	SDL_mutex *mutex;
-	SDL_cond *cond;
-} PacketQueue;
-
-
-typedef struct VideoPicture {
-	AVFrame *frame;
-	int width, height; /* source height & width */
-	double pts;
-} VideoPicture;
-
-//存储视频基本所有信息
-typedef struct VideoState {
-
-	//multi-media file
-	char filename[1024];
-	AVFormatContext *pFormatCtx;
-	int videoStream, audioStream;
-
-
-	double audio_clock;
-	double frame_timer;
-	double frame_last_pts;
-	double frame_last_delay;
-
-	double video_clock; ///<pts of last decoded frame / predicted pts of next decoded frame
-	double video_current_pts; ///<current displayed pts (different from video_clock if frame fifos are used)
-	int64_t video_current_pts_time;  ///<time (av_gettime) at which we updated video_current_pts - used to have running video pts
-
-	//audio
-	AVStream *audio_st;
-	AVCodecContext *audio_ctx;
-	PacketQueue audioq;
-	uint8_t audio_buf[(MAX_AUDIO_FRAME_SIZE * 3) / 2];
-	unsigned int audio_buf_size;
-	unsigned int audio_buf_index;
-	AVFrame audio_frame;
-
-	AVPacket audio_pkt;
-	uint8_t *audio_pkt_data;
-	int audio_pkt_size;
-	int audio_hw_buf_size;
-	struct SwrContext *audio_swr_ctx;
-
-
-	//video
-	AVStream *video_st;
-	AVCodecContext *video_ctx;
-	PacketQueue videoq;
-
-
-	VideoPicture pictq[VIDEO_PICTURE_QUEUE_SIZE];
-	int pictq_size, pictq_rindex
-		, pictq_windex;
-	SDL_mutex *pictq_mutex;
-	SDL_cond *pictq_cond;
-
-	SDL_Thread *parse_tid;
-	SDL_Thread *video_tid;
-
-	int quit;
-} VideoState;
-
+struct ST_ABUF
+{
+	Uint8* buf;
+	int buf_len;
+	int pts;//当前播放声音的时间戳
+};
 
 
 class VideoFile
 {
 public:
-	VideoFile(CWnd* videoWnd,char *filePath);
+	VideoFile(CWnd* videoWnd, char *filePath);
 	~VideoFile();
 
-	static void packet_queue_init(PacketQueue *q);
-	static int packet_queue_put(PacketQueue *q, AVPacket *pkt);
-	static int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block);
-	double get_audio_clock(VideoState *is);
-	static int audio_decode_frame(VideoState *is, uint8_t *audio_buf, int buf_size, double *pts_ptr);
-	static void audio_callback(void *userdata, Uint8 *stream, int len);
-	static Uint32 sdl_refresh_timer_cb(Uint32 interval, void *opaque);
-	static void schedule_refresh(VideoState *is, int delay);
-	void video_display(VideoState *is);
-	void video_refresh_timer(void *userdata);
-	static int queue_picture(VideoState *is, AVFrame *pFrame, double pts);
-	static double synchronize_video(VideoState *is, AVFrame *src_frame, double pts);
-	static int decode_video_thread(void *arg);
-	static int stream_component_open(VideoState *is, int stream_index);
-	static int demux_thread(void *arg);
-	int ShowVideo();
-	size_t my_strlcpy(char *des, const char *src, size_t length);
-	static void SetValue(AVCodecContext *recevicer, uint64_t &out_channel_layout, int &out_nb_samples, int &out_sample_rate, int &out_channels, int64_t &in_channel_layout);
 
-public:
-	//状态数值
-	bool isPause = false;	//暂停
-	bool isForward = false;	//快进
-	bool isBack = false;	//回退
-
-	//初始化数值
+private:
+	//HICON m_hIcon;
+	std::atomic<EM_PLAY_TYPE>     m_playType;//播放状态
 	char* filePath;
 	CWnd* videoWnd;
-
-	//显示数值
-	SDL_mutex *text_mutex;
-	SDL_Window *win = NULL;
-	SDL_Renderer *renderer;
-	SDL_Texture *texture;
 	
-	//屏幕数值
-	int screen_left = SDL_WINDOWPOS_CENTERED;
-	int screen_top = SDL_WINDOWPOS_CENTERED;
-	int resize = 1;
+
+public:
+	//显示视频
+	void ShowVideo();
+	//释放变量
+	void FreeVariable();
+	//显示默认背景图片
+	void showBk(CString strPath = L"bk.bmp");
+	//保存图片
+	void saveFrame(AVFrame* pFrame, int width, int height, int iFrame);
+	//设置播放状态
+	void SetPlayType(EM_PLAY_TYPE type);
+	//获取播放状态
+	EM_PLAY_TYPE GetPlayType();
+	//清空队列
+	void ClearQueue();
+
+public:
+	//总时间数
+	int allTime = 0;
+
+
+	HANDLE           m_hSupendEvent;//暂停信号
+	HANDLE           m_hDecodeEvent;//DecodeThread暂停标志
+	HANDLE           m_hVideoEvent;//VideoThread暂停标志
+	HANDLE           m_hAudioEvent;//AudioThread暂停标志
+	HANDLE           m_hACallEvent;//AudioCallPlay暂停标志
+	HANDLE           m_hDecodeHandel;//解码线程句柄
+	HANDLE           m_hVPlayHandel;//视频播放线程句柄
+	HANDLE           m_hAPlayHandel;//音频播放线程句柄
+
+	//av_read_frame已经读到最后则m_bReadPacketEnd = true，若此时播放还未结束，将进度条向前拉，则m_bReadPacketEnd = false
+	bool             m_bReadPacketEnd;
+
+	AVFormatContext* m_pFormatCtx;
+
+	//video
+	int              m_videoStream;//视频流索引
+	AVCodecContext*  m_pvCodecCtxOrg;
+	AVCodecContext*  m_pvCodecCtx;
+	AVCodec*         m_pvCodec;
+	queue<AVPacket>  m_VList;//存放视频的AVPacket
+	mutex            m_VMutex;//对m_VList操作的互斥锁
+	mutex            m_pSizeMutex;//对改变窗口大小的互斥锁
+
+	//audio
+	int              m_AudioStream;//音频流索引
+	AVCodecContext*  m_paCodecCtxOrg;
+	AVCodecContext*  m_paCodecCtx;
+	AVCodec*         m_paCodec;
+	queue<ST_ABUF>   m_qAbuf;//声音队列，存放解码后的数据
+	list<AVPacket>   m_AList;//存放音频的AVPacket
+	mutex            m_AMutex;//对m_AList操作的互斥锁
+	mutex            m_CMutex;//对m_qAbuf操作的互斥锁
+
+	//sdl
+	SDL_Window*      m_sdlWindow;
+	SDL_Renderer*    m_sdlRenderer;
+	SDL_Texture*     m_sdlTexture;
+
+	//控件
+	CStatic          m_pic;
+	CEdit            m_editFile;
+	CStatic          m_group;
 };
 
-static int screen_width = 0;
-static int screen_height = 0;
-static VideoState *global_video_state;
