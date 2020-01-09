@@ -57,6 +57,12 @@
     <ClInclude Include="VideoFile.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="CExplorer.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="CExplorerManager.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="PublicSecurityVideoRetrievalSystem.cpp">
@@ -90,6 +96,12 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="VideoFile.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="CExplorer.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="CExplorerManager.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

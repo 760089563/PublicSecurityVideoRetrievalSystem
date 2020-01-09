@@ -193,6 +193,8 @@
   <ItemGroup>
     <ClInclude Include="CebianBar.h" />
     <ClInclude Include="CebianDlg.h" />
+    <ClInclude Include="CExplorer.h" />
+    <ClInclude Include="CExplorerManager.h" />
     <ClInclude Include="CShowFile.h" />
     <ClInclude Include="CShowFileDir.h" />
     <ClInclude Include="ImageFile.h" />
@@ -208,6 +210,8 @@
   <ItemGroup>
     <ClCompile Include="CebianBar.cpp" />
     <ClCompile Include="CebianDlg.cpp" />
+    <ClCompile Include="CExplorer.cpp" />
+    <ClCompile Include="CExplorerManager.cpp" />
     <ClCompile Include="CShowFile.cpp" />
     <ClCompile Include="CShowFileDir.cpp" />
     <ClCompile Include="ImageFile.cpp" />

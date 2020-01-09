@@ -3,7 +3,7 @@
 //
 #include "CebianBar.h"
 #include "CebianDlg.h"
-
+#include "CExplorerManager.h"
 #pragma once
 
 class CMainFrame : public CFrameWndEx
@@ -19,8 +19,7 @@ public:
 // 操作
 public:
 
-private:
-	CCebianBar ceBar;
+
 
 // 重写
 public:
@@ -51,8 +50,13 @@ protected:
 	DECLARE_MESSAGE_MAP()
 
 public:
-	// 窗口切分的变量
+	// 窗口切分的变量 -- 之后会删除
 	CSplitterWnd m_wndSplitter;
+	// 工具栏
+	CCebianBar ceBar;
+	// 资源管理器
+	CExplorerManager explorerManager;
+	// 创建客户区  -- 之后会删除
 	virtual BOOL OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext);
 };
 

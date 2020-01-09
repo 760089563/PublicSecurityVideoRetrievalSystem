@@ -148,12 +148,22 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
 
 	CMFCToolBar::SetBasicCommands(lstBasicCommands);
 
-	ceBar.Create(_T("侧边栏"), this, CRect(0, 0, 370, 416), TRUE, 666,
-		WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | CBRS_RIGHT | CBRS_FLOAT_MULTI, AFX_CBRS_REGULAR_TABS,
-		AFX_CBRS_AUTOHIDE | AFX_CBRS_RESIZE | AFX_CBRS_FLOAT);
-	ceBar.EnableDocking(CBRS_ALIGN_RIGHT);
+	/************************* 添加代码 *********************************************************/
+	ceBar.Create(_T("工具栏"), this, CRect(0, 0, 370, 416), TRUE, 666,
+		WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | CBRS_RIGHT | CBRS_FLOAT_MULTI,
+		AFX_CBRS_REGULAR_TABS, AFX_CBRS_AUTOHIDE | AFX_CBRS_RESIZE | AFX_CBRS_FLOAT);
+	ceBar.EnableDocking(CBRS_ALIGN_ANY);
 	DockPane(&ceBar);
-
+	
+	// 创建资源管理器栏
+	explorerManager.Create(_T("资源管理器"), this, CRect(100, 100, 100, 100), TRUE, 999,
+		WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | CBRS_RIGHT | CBRS_FLOAT_MULTI,
+		AFX_CBRS_REGULAR_TABS, AFX_CBRS_AUTOHIDE | AFX_CBRS_RESIZE | AFX_CBRS_FLOAT);
+	explorerManager.EnableDocking(CBRS_ALIGN_ANY);
+	DockPane(&explorerManager);
+	//能使得资源管理器窗口与工具栏窗口相互嵌套
+	CDockablePane* pTabbedBar = nullptr;
+	ceBar.AttachToTabWnd(&explorerManager, DM_SHOW, TRUE, &pTabbedBar);
 	return 0;
 }
 
@@ -333,14 +343,12 @@ BOOL CMainFrame::OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext)
 	// 创建左边窗格中的视图 
 	if (!m_wndSplitter.CreateView(0, 0, RUNTIME_CLASS(CShowFileDir),
 		CSize(275, rc.Height()), pContext))
-
 		return FALSE;
 
 	// 创建右边窗格中的视图
 	if (!m_wndSplitter.CreateView(0, 1, RUNTIME_CLASS(CShowFile),
 		CSize(rc.Width(), rc.Height()), pContext))
-
 		return FALSE;
-	//return CFrameWndEx::OnCreateClient(lpcs, pContext);
+	// return CFrameWndEx::OnCreateClient(lpcs, pContext);
 	return TRUE;
 }

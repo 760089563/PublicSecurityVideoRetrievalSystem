@@ -58,6 +58,13 @@ extern "C"
 #ifdef __cplusplus
 }
 #endif
+#include <afxcontrolbars.h>
+#include <afxcontrolbars.h>
+#include <afxcontrolbars.h>
+#include <afxcontrolbars.h>
+#include <afxcontrolbars.h>
+#include <afxcontrolbars.h>
+#include <afxcontrolbars.h>
 
 #pragma comment(lib,"avcodec.lib")
 #pragma comment(lib,"avdevice.lib")
