@@ -2,761 +2,732 @@
 #include "VideoFile.h"
 
 
+//线程声明
+DWORD WINAPI DecodeThread(LPVOID lpParam);
+DWORD WINAPI VideoThread(LPVOID lpParam);
+DWORD WINAPI AudioThread(LPVOID lpParam);
+void  SDL_AudioCallPlay(void *udata, Uint8 *stream, int len);
+int GetSampleCount(AVSampleFormat out_sample_fmt);
+
+
+int GetSampleCount(AVSampleFormat out_sample_fmt)
+{
+	int count = 0;
+	switch (out_sample_fmt)
+	{
+	case AV_SAMPLE_FMT_S32:count = 4; break;
+	case AV_SAMPLE_FMT_S16:count = 2; break;
+	case AV_SAMPLE_FMT_U8: count = 1; break;
+	}
+	return count;
+}
+
+
+void  SDL_AudioCallPlay(void *udata, Uint8 *stream, int len)
+{
+	VideoFile* pThis = (VideoFile*)udata;
+	SDL_memset(stream, 0, len);
+
+	std::lock_guard<mutex> mtx_locker(pThis->m_CMutex);
+	if (!pThis->m_qAbuf.empty())
+	{
+		static int send_len = 0;
+
+		ST_ABUF* st_buf = &pThis->m_qAbuf.front();
+		int cp_len = (len > st_buf->buf_len ? st_buf->buf_len : len);
+		if (cp_len > 0)
+		{
+			memcpy(stream, st_buf->buf + send_len, cp_len);
+			send_len += cp_len;
+			st_buf->buf_len -= cp_len;
+			if (st_buf->buf_len == 0)
+			{
+				send_len = 0;
+				delete[] st_buf->buf;
+				pThis->m_qAbuf.pop();
+			}
+		}
+		SetEvent(pThis->m_hACallEvent);
+		WaitForSingleObject(pThis->m_hSupendEvent, INFINITE);//暂停后，此处会一直等待，直到SetEvent(m_hSupendEvent)
+		ResetEvent(pThis->m_hACallEvent);
+	}
+}
+
+
 VideoFile::VideoFile(CWnd* videoWnd, char *filePath)
 {
 	this->filePath = filePath;
 	this->videoWnd = videoWnd;
+
+	//m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
+	m_pFormatCtx = nullptr;
+	m_pvCodecCtxOrg = nullptr;
+	m_pvCodecCtx = nullptr;
+	m_pvCodec = nullptr;
+	m_videoStream = -1;
+	m_paCodecCtxOrg = nullptr;
+	m_paCodecCtx = nullptr;
+	m_paCodec = nullptr;
+
+	m_sdlWindow = nullptr;
+	m_sdlRenderer = nullptr;
+	m_sdlTexture = nullptr;
+
+	m_AudioStream = -1;
+	m_hSupendEvent = CreateEvent(NULL, TRUE, TRUE, NULL); //初始有信号
+	m_hDecodeEvent = CreateEvent(NULL, TRUE, TRUE, NULL); //初始有信号
+	m_hVideoEvent = CreateEvent(NULL, TRUE, TRUE, NULL); //初始有信号
+	m_hAudioEvent = CreateEvent(NULL, TRUE, TRUE, NULL); //初始有信号
+	m_hACallEvent = CreateEvent(NULL, TRUE, TRUE, NULL); //初始有信号
+	m_hSupendEvent = CreateEvent(NULL, TRUE, TRUE, NULL); //初始有信号
+	m_hDecodeHandel = INVALID_HANDLE_VALUE;
+	m_hVPlayHandel = INVALID_HANDLE_VALUE;
+	m_hAPlayHandel = INVALID_HANDLE_VALUE;
 }
 
-
+//销毁回收   线程回收
 VideoFile::~VideoFile()
 {
-}
-
-
-// 初始化队列
-void VideoFile::packet_queue_init(PacketQueue *q) {
-	memset(q, 0, sizeof(PacketQueue));
-	q->mutex = SDL_CreateMutex();
-	q->cond = SDL_CreateCond();
-}
-
-//向队列中加入数据包
-int VideoFile::packet_queue_put(PacketQueue *q, AVPacket *pkt) {
-
-	AVPacketList *pkt1;
-	if (av_packet_make_refcounted(pkt) < 0) {
-		return -1;
+	SetPlayType(EM_PLAY_TYPE_STOP);
+	if (m_hDecodeHandel != INVALID_HANDLE_VALUE)
+	{
+		WaitForSingleObject(m_hDecodeHandel, INFINITE);
+		m_hDecodeHandel = INVALID_HANDLE_VALUE;
 	}
-	pkt1 = (AVPacketList*)av_malloc(sizeof(AVPacketList));
-	if (!pkt1)
-		return -1;
-	pkt1->pkt = *pkt;
-	pkt1->next = NULL;
+	if (m_hVPlayHandel != INVALID_HANDLE_VALUE)
+	{
+		WaitForSingleObject(m_hVPlayHandel, INFINITE);
+		m_hVPlayHandel = INVALID_HANDLE_VALUE;
+	}
+	if (m_hAPlayHandel != INVALID_HANDLE_VALUE)
+	{
+		WaitForSingleObject(m_hAPlayHandel, INFINITE);
+		m_hAPlayHandel = INVALID_HANDLE_VALUE;
+	}
+	FreeVariable();
+	if (m_sdlWindow)
+	{
+		SDL_DestroyWindow(m_sdlWindow);
+	}
+	SDL_Quit();
+}
 
-	SDL_LockMutex(q->mutex);
 
-	if (!q->last_pkt)
-		q->first_pkt = pkt1;
+
+void VideoFile::ShowVideo()
+{
+
+	av_register_all(); // 注册支持的文件格式及对应的codec
+	SetPlayType(EM_PLAY_TYPE_STOP);
+	//PostMessage(WM_SHOW_BK, NULL, 0);
+
+	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER))
+	{
+		//MessageBox(L"sdl init error");
+		printf("sdl init error");
+	}
+
+	m_sdlWindow = SDL_CreateWindowFrom(videoWnd->GetSafeHwnd());
+	if (!m_sdlWindow)
+	{
+		//MessageBox(L"SDL_CreateWindowFrom error");
+		printf("SDL_CreateWindowFrom error");
+		return;
+	}
+
+	//获取路径
+	FreeVariable();
+	// 读取文件头，将格式相关信息存放在AVFormatContext结构体中
+	if (avformat_open_input(&m_pFormatCtx, filePath, nullptr, nullptr) != 0)
+	{
+		//MessageBox(L"avformat open input failed !", L"错误");
+		printf("avformat open input failed!");
+		return;
+	}
+
+	// 检测文件的流信息
+	if (avformat_find_stream_info(m_pFormatCtx, nullptr) < 0)
+	{
+		//MessageBox(L"avformat find stream info failed !", L"错误");
+		printf("avformat find stream info failed!");
+		return;
+	}
+
+	//查找视频流 音频流
+	for (int i = 0; i < m_pFormatCtx->nb_streams; i++)
+	{
+		if (m_pFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO)
+			m_videoStream = i;
+		else if (m_pFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_AUDIO)
+			m_AudioStream = i;
+	}
+	if (m_videoStream == -1)
+	{
+		//MessageBox(L"没有找到视频流!", L"错误");
+		printf("没有找到视频流!");
+		return;
+	}
+
+	//video
+	AVStream* vStream = m_pFormatCtx->streams[m_videoStream];
+	m_pvCodecCtxOrg = vStream->codec;
+
+	// 找到视频解码器
+	m_pvCodec = avcodec_find_decoder(m_pvCodecCtxOrg->codec_id);
+	if (!m_pvCodec)
+	{
+		//MessageBox(L"查找视频解码器失败!", L"错误");
+		printf("查找视频解码器失败!");
+		return;
+	}
+
+	// 不直接使用从AVFormatContext得到的CodecContext，要复制一个
+	m_pvCodecCtx = avcodec_alloc_context3(m_pvCodec);
+	if (avcodec_copy_context(m_pvCodecCtx, m_pvCodecCtxOrg) != 0)
+	{
+		//MessageBox(L"Could not copy vcodec context!", L"错误");
+		printf("Could not copy vcodec context!");
+		return;
+	}
+
+	//audio
+	if (m_AudioStream >= 0)
+	{
+		AVStream* aStream = m_pFormatCtx->streams[m_AudioStream];
+		m_paCodecCtxOrg = aStream->codec;
+
+		// 找到音频解码器
+		m_paCodec = avcodec_find_decoder(m_paCodecCtxOrg->codec_id);
+		if (!m_paCodec)
+		{
+			//MessageBox(L"查找音频解码器失败!", L"错误");
+			printf("查找音频解码器失败!");
+			return;
+		}
+
+		m_paCodecCtx = avcodec_alloc_context3(m_paCodec);
+		if (avcodec_copy_context(m_paCodecCtx, m_paCodecCtxOrg) != 0)
+		{
+			//MessageBox(L"Could not copy acodec context!", L"错误");
+			printf("Could not copy acodec context!");
+			return;
+		}
+
+		//声道数
+		int channel = m_paCodecCtx->channels;
+		//strTmp.Format(L"%d", channel);
+		//GetDlgItem(IDC_EDIT_SDS)->SetWindowText(strTmp);
+		//采样率
+		int rate = m_paCodecCtx->sample_rate;
+		//strTmp.Format(L"%d", rate);
+		//GetDlgItem(IDC_EDIT_RATE)->SetWindowText(strTmp);
+	}
 	else
-		q->last_pkt->next = pkt1;
-	q->last_pkt = pkt1;
-	q->nb_packets++;
-	q->size += pkt1->pkt.size;
-	SDL_CondSignal(q->cond);
+	{
+		//GetDlgItem(IDC_EDIT_SDS)->SetWindowText(L"");
+		//GetDlgItem(IDC_EDIT_RATE)->SetWindowText(L"");
+	}
 
-	SDL_UnlockMutex(q->mutex);
+	double time = (double)(m_pFormatCtx->duration) / AV_TIME_BASE;//时长
+	int us = (m_pFormatCtx->duration) % AV_TIME_BASE;
+	int sec = (int)time % 60;
+	int min = (int)time / 60 % 60;
+	int h = (int)time / 60 / 60;
+	//strTmp.Format(L"%02d时%02d分%02d秒%02d", h, min, sec, (100 * us) / AV_TIME_BASE);
+	//GetDlgItem(IDC_EDIT_TIME)->SetWindowTextW(strTmp);
+
+	int ml = m_pFormatCtx->bit_rate;//码率
+	//strTmp.Format(L"%d", ml);
+	//GetDlgItem(IDC_EDIT_ML)->SetWindowTextW(strTmp);
+
+	AVInputFormat* avPtFmt = m_pFormatCtx->iformat;
+	//GetDlgItem(IDC_EDIT_FORMAT_NAME)->SetWindowTextW(A2T(avPtFmt->name));
+	//GetDlgItem(IDC_EDIT_FORMAT_LNAME)->SetWindowTextW(A2T(avPtFmt->long_name));
+	//GetDlgItem(IDC_EDIT_FORMAT_EXNAME)->SetWindowTextW(A2T(avPtFmt->extensions));
+
+	int frame_rate = 0;//帧率
+	if (vStream->r_frame_rate.den > 0)
+		frame_rate = av_q2d(vStream->r_frame_rate);//avStream->r_frame_rate.num / avStream->r_frame_rate.den;
+	else if (m_pvCodecCtxOrg->framerate.den > 0)
+		frame_rate = av_q2d(m_pvCodecCtxOrg->framerate);//m_pvCodecCtxOrg->framerate.num / m_pvCodecCtxOrg->framerate.den;
+
+	int zs = vStream->nb_frames;
+	if (zs == 0)
+	{
+		zs = time * frame_rate;
+	}
+	//strTmp.Format(L"%d", zs);
+	//GetDlgItem(IDC_EDIT_ZS)->SetWindowTextW(strTmp);
+	//strTmp.Format(L"%d", frame_rate);
+	allTime = frame_rate;
+	//GetDlgItem(IDC_EDIT_ZL)->SetWindowTextW(strTmp);
+	//strTmp.Format(L"%d", m_pvCodecCtxOrg->width);
+	//GetDlgItem(IDC_EDIT_WIDTH)->SetWindowTextW(strTmp);
+	//strTmp.Format(L"%d", m_pvCodecCtxOrg->height);
+	//GetDlgItem(IDC_EDIT_HEIGHT)->SetWindowTextW(strTmp);
+
+	//这个是滚动条的设置
+	//m_slider.SetRange(0, time * 1000);
+	//m_slider.SetTicFreq(1);
+	//m_slider.SetPos(0);
+
+	//if (m_playType == EM_PLAY_TYPE_PAUSE)
+	//{
+	//	SetPlayType(EM_PLAY_TYPE_PLAY);
+	//}
+	//else if (m_playType == EM_PLAY_TYPE_STOP)
+	//{
+	//播放
+	SetPlayType(EM_PLAY_TYPE_PLAY);
+	m_hDecodeHandel = CreateThread(NULL, NULL, DecodeThread, this, 0, 0);
+	//}
+
+}
+
+void VideoFile::FreeVariable()
+{
+	m_videoStream = -1;
+	m_AudioStream = -1;
+	if (m_pvCodecCtxOrg)
+	{
+		avcodec_close(m_pvCodecCtxOrg);
+		m_pvCodecCtxOrg = nullptr;
+	}
+	if (m_pvCodecCtx)
+	{
+		avcodec_close(m_pvCodecCtx);
+		m_pvCodecCtx = nullptr;
+	}
+	if (m_paCodecCtxOrg)
+	{
+		avcodec_close(m_paCodecCtxOrg);
+		m_paCodecCtxOrg = nullptr;
+	}
+	if (m_paCodecCtx)
+	{
+		avcodec_close(m_paCodecCtx);
+		m_paCodecCtx = nullptr;
+	}
+	if (m_pFormatCtx)
+	{
+		avformat_close_input(&m_pFormatCtx);
+		m_pFormatCtx = nullptr;
+	}
+	if (m_sdlRenderer)
+	{
+		SDL_DestroyRenderer(m_sdlRenderer);
+		m_sdlRenderer = nullptr;
+	}
+	if (m_sdlTexture)
+	{
+		SDL_DestroyTexture(m_sdlTexture);
+		m_sdlTexture = nullptr;
+	}
+}
+
+void VideoFile::SetPlayType(EM_PLAY_TYPE type)
+{
+	m_playType = type;
+	switch (type)
+	{
+	case EM_PLAY_TYPE_PLAY:
+	{
+		//GetDlgItem(IDC_BTN_OPEN)->EnableWindow(FALSE);
+		//GetDlgItem(IDC_BTN_DECODE_ONE)->EnableWindow(FALSE);
+		//GetDlgItem(IDC_BTN_PAUSE)->EnableWindow(TRUE);
+		//GetDlgItem(IDC_BTN_STOP)->EnableWindow(TRUE);
+		SetEvent(m_hSupendEvent);
+		break;
+	}
+	case EM_PLAY_TYPE_PAUSE:
+	{
+		//GetDlgItem(IDC_BTN_DECODE_ONE)->EnableWindow(TRUE);
+		//GetDlgItem(IDC_BTN_PAUSE)->EnableWindow(FALSE);
+		//GetDlgItem(IDC_BTN_STOP)->EnableWindow(TRUE);
+		ResetEvent(m_hSupendEvent);
+		break;
+	}
+	case EM_PLAY_TYPE_STOP:
+	{
+		SetEvent(m_hSupendEvent);
+		if (m_hDecodeHandel != INVALID_HANDLE_VALUE)
+		{
+			WaitForSingleObject(m_hDecodeHandel, INFINITE);
+			m_hDecodeHandel = INVALID_HANDLE_VALUE;
+		}
+		if (m_hVPlayHandel != INVALID_HANDLE_VALUE)
+		{
+			WaitForSingleObject(m_hVPlayHandel, INFINITE);
+			m_hVPlayHandel = INVALID_HANDLE_VALUE;
+		}
+		if (m_hAPlayHandel != INVALID_HANDLE_VALUE)
+		{
+			WaitForSingleObject(m_hAPlayHandel, INFINITE);
+			m_hAPlayHandel = INVALID_HANDLE_VALUE;
+		}
+
+		ClearQueue();
+		//GetDlgItem(IDC_BTN_OPEN)->EnableWindow(TRUE);
+		//GetDlgItem(IDC_BTN_DECODE_ONE)->EnableWindow(TRUE);
+		//GetDlgItem(IDC_BTN_PAUSE)->EnableWindow(FALSE);
+		//GetDlgItem(IDC_BTN_STOP)->EnableWindow(FALSE);
+		break;
+	}
+	}
+}
+
+EM_PLAY_TYPE VideoFile::GetPlayType()
+{
+	return m_playType;
+}
+
+void VideoFile::ClearQueue()
+{
+	while (!m_qAbuf.empty())
+	{
+		ST_ABUF* stBuf = &m_qAbuf.front();
+		delete[] stBuf->buf;
+		m_qAbuf.pop();
+	}
+	while (!m_VList.empty())
+	{
+		AVPacket* pkt = &m_VList.front();
+		av_free_packet(pkt);
+		m_VList.pop();
+	}
+	while (!m_AList.empty())
+	{
+		AVPacket* pkt = &m_AList.front();
+		av_free_packet(pkt);
+		m_AList.pop_front();
+	}
+}
+
+
+DWORD __stdcall DecodeThread(LPVOID lpParam)
+{
+	VideoFile* pThis = (VideoFile*)lpParam;
+
+	do
+	{
+		if (!pThis->m_pvCodecCtxOrg || !pThis->m_pvCodec)
+		{
+			break;
+		}
+		if (avcodec_open2(pThis->m_pvCodecCtx, pThis->m_pvCodec, nullptr) < 0)
+		{
+			//异步通信
+			//pThis->PostMessageW(WM_ERROR_MSG, EM_AVCODE_OPEN_ERROR);
+			break;
+		}
+
+		//打开音视频播放线程
+		pThis->m_hVPlayHandel = CreateThread(NULL, NULL, VideoThread, pThis, 0, 0);
+		pThis->m_hAPlayHandel = CreateThread(NULL, NULL, AudioThread, pThis, 0, 0);
+
+		//播放前先seek到起点
+		av_seek_frame(pThis->m_pFormatCtx, pThis->m_videoStream, 0, AVSEEK_FLAG_BACKWARD);
+
+		while (true)
+		{
+			SetEvent(pThis->m_hDecodeEvent);//若为暂停状态，执行到此处才表示该线程真正暂停了
+			WaitForSingleObject(pThis->m_hSupendEvent, INFINITE);//暂停后，此处会一直等待，直到SetEvent(m_hSupendEvent)
+			ResetEvent(pThis->m_hDecodeEvent);
+			if (pThis->GetPlayType() == EM_PLAY_TYPE_STOP)
+			{
+				break;
+			}
+
+			{
+				std::lock_guard<mutex> mtx_locker(pThis->m_VMutex);
+				int v_size = pThis->m_VList.size();
+				if (v_size >= MAX_VQUEUE)
+				{
+					//当队列饱和时等待播放线程消耗再继续解码放入，否则内存占用越来越大
+					continue;
+				}
+			}
+
+			AVPacket packet;
+			if (av_read_frame(pThis->m_pFormatCtx, &packet) >= 0)
+			{
+				pThis->m_bReadPacketEnd = false;
+				if (packet.stream_index == pThis->m_videoStream)
+				{
+					std::lock_guard<mutex> mtx_locker(pThis->m_VMutex);
+					pThis->m_VList.push(packet);
+				}
+				else if (packet.stream_index == pThis->m_AudioStream)
+				{
+					std::lock_guard<mutex> mtx_locker(pThis->m_AMutex);
+					pThis->m_AList.push_back(packet);
+
+				}
+			}
+			else
+				pThis->m_bReadPacketEnd = true; //若此时播放还未结束，将进度条向前拉，则m_bReadPacketEnd = false
+		}
+	} while (0);
 	return 0;
 }
 
-//数据包出队列
-int VideoFile::packet_queue_get(PacketQueue *q, AVPacket *pkt, int block) {
-	AVPacketList *pkt1;
-	int ret;
-
-	SDL_LockMutex(q->mutex);
-
-	for (;;) {
-
-		if (global_video_state->quit) {
-			ret = -1;
-			break;
-		}
-
-		pkt1 = q->first_pkt;
-		if (pkt1) {
-			q->first_pkt = pkt1->next;
-			if (!q->first_pkt)
-				q->last_pkt = NULL;
-			q->nb_packets--;
-			q->size -= pkt1->pkt.size;
-			*pkt = pkt1->pkt;
-			av_free(pkt1);
-			ret = 1;
-			break;
-		}
-		else if (!block) {
-			ret = 0;
-			break;
-		}
-		else {
-			SDL_CondWait(q->cond, q->mutex);
-		}
-	}
-	SDL_UnlockMutex(q->mutex);
-	return ret;
-}
-
-//
-double VideoFile::get_audio_clock(VideoState *is) {
-	double pts;
-	int hw_buf_size, bytes_per_sec, n;
-
-	//上一步获取的PTS
-	pts = is->audio_clock;
-	// 音频缓冲区还没有播放的数据
-	hw_buf_size = is->audio_buf_size - is->audio_buf_index;
-	// 每秒钟音频播放的字节数
-	bytes_per_sec = 0;
-	n = is->audio_ctx->channels * 2;
-	if (is->audio_st) {
-		bytes_per_sec = is->audio_ctx->sample_rate * n;
-	}
-	if (bytes_per_sec) {
-		pts -= (double)hw_buf_size / bytes_per_sec;
-	}
-	return pts;
-}
-
-// 音频帧解码
-int VideoFile::audio_decode_frame(VideoState *is, uint8_t *audio_buf, int buf_size, double *pts_ptr)
+DWORD __stdcall VideoThread(LPVOID lpParam)
 {
+	VideoFile* pThis = (VideoFile*)lpParam;
 
-	int len1, data_size = 0;
-	AVPacket *pkt = &is->audio_pkt;
-	double pts;
-	int n;
+	//------------SDL----------------
+	if (!pThis->m_sdlRenderer && !pThis->m_sdlTexture)
+	{
+		pThis->m_sdlRenderer = SDL_CreateRenderer(pThis->m_sdlWindow, -1, 0);
+		pThis->m_sdlTexture = SDL_CreateTexture(pThis->m_sdlRenderer, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, pThis->m_pvCodecCtx->width, pThis->m_pvCodecCtx->height);
+	}
+	//----------------------------------
 
+	AVFrame* pFrame = av_frame_alloc();
+	AVFrame* pFrameYUV420 = av_frame_alloc();
 
-	for (;;) {
-		while (is->audio_pkt_size > 0) {
-			avcodec_send_packet(is->audio_ctx, pkt);
-			while (avcodec_receive_frame(is->audio_ctx, &is->audio_frame) == 0) {
-				len1 = is->audio_frame.pkt_size;
+	// 使用的缓冲区的大小
+	int numBytes = 0;
+	uint8_t* buffer = nullptr;
 
-				if (len1 < 0) {
-					/* if error, skip frame */
-					is->audio_pkt_size = 0;
+	//AV_PIX_FMT_BGR24 / AV_PIX_FMT_YUV420P
+	numBytes = avpicture_get_size(AV_PIX_FMT_YUV420P, pThis->m_pvCodecCtx->width, pThis->m_pvCodecCtx->height);
+	buffer = (uint8_t*)av_malloc(numBytes * sizeof(uint8_t));
+
+	avpicture_fill((AVPicture*)pFrameYUV420, buffer, AV_PIX_FMT_YUV420P, pThis->m_pvCodecCtx->width, pThis->m_pvCodecCtx->height);
+
+	struct SwsContext* sws_ctx = nullptr;
+	sws_ctx = sws_getContext(pThis->m_pvCodecCtx->width, pThis->m_pvCodecCtx->height, pThis->m_pvCodecCtx->pix_fmt,
+		pThis->m_pvCodecCtx->width, pThis->m_pvCodecCtx->height, AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+	while (true)
+	{
+		SetEvent(pThis->m_hVideoEvent);//若为暂停状态，执行到此处才表示真正暂停了
+		WaitForSingleObject(pThis->m_hSupendEvent, INFINITE);//暂停后，此处会一直等待，直到SetEvent(m_hSupendEvent)
+		ResetEvent(pThis->m_hVideoEvent);
+		if (pThis->GetPlayType() == EM_PLAY_TYPE_STOP)
+		{
+			break;
+		}
+
+		if (!pThis->m_VList.empty())
+		{
+			AVPacket* packet = &pThis->m_VList.front();
+			if (packet->buf == NULL)
+			{
+				av_free_packet(packet);
+				std::lock_guard<mutex> mtx_locker(pThis->m_VMutex);
+				pThis->m_VList.pop();
+				continue;
+			}
+			//视频处理
+			int ret = avcodec_send_packet(pThis->m_pvCodecCtx, packet);
+			if (ret < 0)
+			{
+				av_free_packet(packet);
+				//pThis->PostMessage(WM_ERROR_MSG, NULL, EM_SEND_PACKET_ERROR);
+				break;
+			}
+			while (ret >= 0)
+			{
+				ret = avcodec_receive_frame(pThis->m_pvCodecCtx, pFrame);
+				if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+				{
+					ret = 0;
 					break;
 				}
+				else if (ret < 0)
+					continue;
 
-				data_size = 2 * is->audio_frame.nb_samples * 2;
-				assert(data_size <= buf_size);
+				//图像转换
+				sws_scale(sws_ctx, (uint8_t const * const *)pFrame->data, pFrame->linesize, 0,
+					pThis->m_pvCodecCtx->height, pFrameYUV420->data, pFrameYUV420->linesize);
 
-				swr_convert(is->audio_swr_ctx,
-					&audio_buf,
-					MAX_AUDIO_FRAME_SIZE * 3 / 2,
-					(const uint8_t **)is->audio_frame.data,
-					is->audio_frame.nb_samples);
+				int pts = packet->pts > 0 ? packet->pts : packet->dts;
 
+				//当前帧显示时间
+				double sec = pts * av_q2d(pThis->m_pFormatCtx->streams[pThis->m_videoStream]->time_base);
+
+				{
+					std::lock_guard<mutex> mtx_locker(pThis->m_pSizeMutex);
+					//通过SDL来显示
+					SDL_UpdateTexture(pThis->m_sdlTexture, NULL, pFrameYUV420->data[0], pFrameYUV420->linesize[0]);
+					SDL_RenderClear(pThis->m_sdlRenderer);
+					SDL_RenderCopy(pThis->m_sdlRenderer, pThis->m_sdlTexture, NULL, NULL);
+					SDL_RenderPresent(pThis->m_sdlRenderer);
+				}
+
+				//更新进度条
+				//pThis->PostMessageW(WM_UPDATE_SLIDER, NULL, sec * 1000);
+				int zl = pThis->allTime;
+				//每一帧显示时间
+				Sleep(1000 / zl);
 			}
-			is->audio_pkt_data += len1;
-			is->audio_pkt_size -= len1;
-			if (data_size <= 0) {
-				/* No data yet, get more frames */
-				continue;
-			}
-			pts = is->audio_clock;
-			*pts_ptr = pts;
-			n = 2 * is->audio_ctx->channels;
-			is->audio_clock += (double)data_size /
-				(double)(n * is->audio_ctx->sample_rate);
-			/* We have data, return it and come back for more later */
-			return data_size;
+			av_free_packet(packet);
+			std::lock_guard<mutex> mtx_locker(pThis->m_VMutex);
+			pThis->m_VList.pop();
 		}
-		if (pkt->data)
-			av_packet_unref(pkt);
-
-		if (is->quit) {
-			return -1;
-		}
-		/* next packet */
-		if (packet_queue_get(&is->audioq, pkt, 1) < 0) {
-			return -1;
-		}
-		is->audio_pkt_data = pkt->data;
-		is->audio_pkt_size = pkt->size;
-		/* if update, update the audio clock w/pts */
-		if (pkt->pts != AV_NOPTS_VALUE) {
-			is->audio_clock = av_q2d(is->audio_st->time_base) * pkt->pts;
+		else if (pThis->m_bReadPacketEnd)
+		{
+			//解码结束且队列为空则播放完成
+			break;
 		}
 	}
-}
 
-//// 音频设备回调
-void VideoFile::audio_callback(void *userdata, Uint8 *stream, int len) {
+	av_free(buffer);
+	av_frame_free(&pFrameYUV420);
+	av_frame_free(&pFrame);
 
-	VideoState *is = (VideoState *)userdata;
-	int len1, audio_size;
-	double pts;
-
-	SDL_memset(stream, 0, len);
-
-	while (len > 0) {
-		if (is->audio_buf_index >= is->audio_buf_size) {
-			// 音频解码
-			audio_size = audio_decode_frame(is, is->audio_buf, sizeof(is->audio_buf), &pts);
-			if (audio_size < 0) {
-				// 音频解码错误，播放静音
-				is->audio_buf_size = 1024 * 2 * 2;
-				memset(is->audio_buf, 0, is->audio_buf_size);
-			}
-			else {
-				is->audio_buf_size = audio_size;
-			}
-			is->audio_buf_index = 0;
-		}
-		len1 = is->audio_buf_size - is->audio_buf_index;
-		if (len1 > len)
-			len1 = len;
-		SDL_MixAudio(stream, (uint8_t *)is->audio_buf + is->audio_buf_index, len1, SDL_MIX_MAXVOLUME);
-		len -= len1;
-		stream += len1;
-		is->audio_buf_index += len1;
+	if (pThis->GetPlayType() != EM_PLAY_TYPE_STOP)
+	{
+		pThis->m_hVPlayHandel = INVALID_HANDLE_VALUE;
+		pThis->SetPlayType(EM_PLAY_TYPE_STOP);
 	}
-}
-
-//// 定时器回调函数，发送FF_REFRESH_EVENT事件，更新显示视频帧
-Uint32 VideoFile::sdl_refresh_timer_cb(Uint32 interval, void *opaque) {
-	SDL_Event event;
-	event.type = FF_REFRESH_EVENT;
-	event.user.data1 = opaque;
-	SDL_PushEvent(&event);
+	//pThis->PostMessage(WM_SHOW_BK, NULL, 0);
 	return 0;
 }
 
-//// 设置定时器
-void VideoFile::schedule_refresh(VideoState *is, int delay) {
-	SDL_AddTimer(delay, sdl_refresh_timer_cb, is);
-}
+DWORD __stdcall AudioThread(LPVOID lpParam)
+{
+	VideoFile* pThis = (VideoFile*)lpParam;
 
-//// 视频播放
-void VideoFile::video_display(VideoState *is) {
-
-	SDL_Rect rect;
-	VideoPicture *vp;
-
-	if (screen_width && resize) {
-		SDL_SetWindowSize(win, screen_width, screen_height);
-		SDL_SetWindowPosition(win, screen_left, screen_top);
-		SDL_ShowWindow(win);
-
-		Uint32 pixformat = SDL_PIXELFORMAT_IYUV;
-
-		//create texture for render
-		texture = SDL_CreateTexture(renderer,
-			pixformat,
-			SDL_TEXTUREACCESS_STREAMING,
-			screen_width,
-			screen_height);
-		resize = 0;
-	}
-
-	vp = &is->pictq[is->pictq_rindex];
-
-	// 渲染播放
-	if (vp->frame) {
-		SDL_UpdateYUVTexture(texture, NULL,
-			vp->frame->data[0], vp->frame->linesize[0],
-			vp->frame->data[1], vp->frame->linesize[1],
-			vp->frame->data[2], vp->frame->linesize[2]);
-
-		rect.x = 0;
-		rect.y = 0;
-		rect.w = is->video_ctx->width;
-		rect.h = is->video_ctx->height;
-		SDL_LockMutex(text_mutex);
-		SDL_RenderClear(renderer);
-		SDL_RenderCopy(renderer, texture, NULL, &rect);
-		SDL_RenderPresent(renderer);
-		SDL_UnlockMutex(text_mutex);
-	}
-}
-
-//// 视频刷新播放，并预测下一帧的播放时间，设置新的定时器
-void VideoFile::video_refresh_timer(void *userdata) {
-
-	VideoState *is = (VideoState *)userdata;
-	VideoPicture *vp;
-	double actual_delay, delay, sync_threshold, ref_clock, diff;
-
-	if (is->video_st) {
-		if (is->pictq_size == 0) {
-			schedule_refresh(is, 1);
+	do
+	{
+		CoInitialize(NULL);
+		if (!pThis->m_paCodecCtxOrg || !pThis->m_paCodec)
+		{
+			break;
 		}
-		else {
-			// 从数组中取出一帧视频帧
-			vp = &is->pictq[is->pictq_rindex];
-
-			is->video_current_pts = vp->pts;
-			is->video_current_pts_time = av_gettime();
-			// 当前Frame时间减去上一帧的时间，获取两帧间的时差
-			delay = vp->pts - is->frame_last_pts;
-			if (delay <= 0 || delay >= 1.0) {
-				// 延时小于0或大于1秒（太长）都是错误的，将延时时间设置为上一次的延时时间
-				delay = is->frame_last_delay;
-			}
-			// 保存延时和PTS，等待下次使用
-			is->frame_last_delay = delay;
-			is->frame_last_pts = vp->pts;
-
-			// 获取音频Audio_Clock
-			ref_clock = get_audio_clock(is);
-			// 得到当前PTS和Audio_Clock的差值
-			diff = vp->pts - ref_clock;
-
-			/* Skip or repeat the frame. Take delay into account
-			   FFPlay still doesn't "know if this is the best guess." */
-			sync_threshold = (delay > AV_SYNC_THRESHOLD) ? delay : AV_SYNC_THRESHOLD;
-			if (fabs(diff) < AV_NOSYNC_THRESHOLD) {
-				if (diff <= -sync_threshold) {
-					delay = 0;
-				}
-				else if (diff >= sync_threshold) {
-					delay = 2 * delay;
-				}
-			}
-			is->frame_timer += delay;
-			// 最终真正要延时的时间
-			actual_delay = is->frame_timer - (av_gettime() / 1000000.0);
-			if (actual_delay < 0.010) {
-				// 延时时间过小就设置最小值
-				actual_delay = 0.010;
-			}
-			// 根据延时时间重新设置定时器，刷新视频
-			schedule_refresh(is, (int)(actual_delay * 1000 + 0.5));
-
-			// 视频帧显示
-			video_display(is);
-
-			//此处进行暂停操作
-			while (isPause)
-			{
-
-			}
-
-			// 更新视频帧数组下标
-			if (++is->pictq_rindex == VIDEO_PICTURE_QUEUE_SIZE) {
-				is->pictq_rindex = 0;
-			}
-			SDL_LockMutex(is->pictq_mutex);
-			// 视频帧数组减一
-			is->pictq_size--;
-			SDL_CondSignal(is->pictq_cond);
-			SDL_UnlockMutex(is->pictq_mutex);
-		}
-	}
-	else {
-		schedule_refresh(is, 100);
-	}
-}
-
-////解码后视频帧保存
-int VideoFile::queue_picture(VideoState *is, AVFrame *pFrame, double pts) {
-
-	VideoPicture *vp;
-
-	/* wait until we have space for a new pic */
-	SDL_LockMutex(is->pictq_mutex);
-	while (is->pictq_size >= VIDEO_PICTURE_QUEUE_SIZE && !is->quit) {
-		SDL_CondWait(is->pictq_cond, is->pictq_mutex);
-	}
-	SDL_UnlockMutex(is->pictq_mutex);
-
-	if (is->quit)
-		return -1;
-
-	// windex is set to 0 initially
-	vp = &is->pictq[is->pictq_windex];
-
-
-	//    /* allocate or resize the buffer! */
-	if (!vp->frame ||
-		vp->width != is->video_ctx->width ||
-		vp->height != is->video_ctx->height) {
-
-		vp->frame = av_frame_alloc();
-		if (is->quit) {
-			return -1;
-		}
-	}
-
-	/* We have a place to put our picture on the queue */
-	if (vp->frame) {
-
-		vp->pts = pts;
-
-		vp->frame = pFrame;
-		/* now we inform our display thread that we have a pic ready */
-		if (++is->pictq_windex == VIDEO_PICTURE_QUEUE_SIZE) {
-			is->pictq_windex = 0;
-		}
-
-		SDL_LockMutex(is->pictq_mutex);
-		is->pictq_size++;
-		SDL_UnlockMutex(is->pictq_mutex);
-	}
-	return 0;
-}
-
-////  视频同步，获取正确的视频PTS
-double VideoFile::synchronize_video(VideoState *is, AVFrame *src_frame, double pts) {
-
-	double frame_delay;
-
-	if (pts != 0) {
-		is->video_clock = pts;
-	}
-	else {
-		pts = is->video_clock;
-	}
-	/* update the video clock */
-	frame_delay = av_q2d(is->video_ctx->time_base);
-	/* if we are repeating a frame, adjust clock accordingly */
-	frame_delay += src_frame->repeat_pict * (frame_delay * 0.5);
-	is->video_clock += frame_delay;
-	return pts;
-}
-
-
-//// 视频解码
-int VideoFile::decode_video_thread(void *arg) {
-	VideoState *is = (VideoState *)arg;
-	AVPacket pkt1, *packet = &pkt1;
-	AVFrame *pFrame;
-	double pts;
-
-	pFrame = av_frame_alloc();
-
-	for (;;) {
-		if (packet_queue_get(&is->videoq, packet, 1) < 0) {
-			// means we quit getting packets
+		if (avcodec_open2(pThis->m_paCodecCtx, pThis->m_paCodec, nullptr) != 0)
+		{
 			break;
 		}
 
-		// Decode video frame
-		avcodec_send_packet(is->video_ctx, packet);
-		while (avcodec_receive_frame(is->video_ctx, pFrame) == 0) {
-			if ((pts = pFrame->best_effort_timestamp) != AV_NOPTS_VALUE) {
-			}
-			else {
-				pts = 0;
-			}
-			pts *= av_q2d(is->video_st->time_base);
+		//输入的采样格式
+		enum AVSampleFormat in_sample_fmt = pThis->m_paCodecCtx->sample_fmt;
+		//输出的采样格式 16bit PCM
+		enum AVSampleFormat out_sample_fmt = AV_SAMPLE_FMT_S16;
+		//输入的采样率
+		int in_sample_rate = pThis->m_paCodecCtx->sample_rate;
+		//输出的采样率
+		int out_sample_rate = in_sample_rate;
+		//输入的声道布局
+		uint64_t in_ch_layout = av_get_default_channel_layout(pThis->m_paCodecCtx->channels);
+		//输出的声道布局
+		uint64_t out_ch_layout = av_get_default_channel_layout(2);
 
-			pts = synchronize_video(is, pFrame, pts);
-			if (queue_picture(is, pFrame, pts) < 0) {
-				break;
-			}
-			av_packet_unref(packet);
-		}
-	}
-	av_frame_free(&pFrame);
-	return 0;
-}
+		//输出通道数
+		int out_channels = av_get_channel_layout_nb_channels(out_ch_layout);
+		int out_nb_samples = pThis->m_paCodecCtx->frame_size;
 
-void VideoFile::SetValue(AVCodecContext *recevicer, uint64_t &out_channel_layout, int &out_nb_samples, int &out_sample_rate, int &out_channels, int64_t &in_channel_layout) {
-	out_channel_layout = AV_CH_LAYOUT_STEREO;
-	out_nb_samples = recevicer->frame_size;
-	out_sample_rate = recevicer->sample_rate;
-	out_channels = av_get_channel_layout_nb_channels(out_channel_layout);
-	in_channel_layout = av_get_default_channel_layout(recevicer->channels);
-
-}
-//// 打开流，准备解码
-int VideoFile::stream_component_open(VideoState *is, int stream_index) {
-
-	AVFormatContext *pFormatCtx = is->pFormatCtx;
-	AVCodecContext *codecCtx = NULL;
-	AVCodec *codec = NULL;
-	SDL_AudioSpec wanted_spec;
-
-	if (stream_index < 0 || stream_index >= pFormatCtx->nb_streams) {
-		return -1;
-	}
-
-	codecCtx = avcodec_alloc_context3(NULL);
-	int ret = avcodec_parameters_to_context(codecCtx, pFormatCtx->streams[stream_index]->codecpar);
-	if (ret < 0)
-		return -1;
-
-	codec = avcodec_find_decoder(codecCtx->codec_id);
-	if (!codec) {
-		fprintf(stderr, "Unsupported codec!\n");
-		return -1;
-	}
-
-	// 打开解码器
-	if (avcodec_open2(codecCtx, codec, NULL) < 0) {
-		fprintf(stderr, "Unsupported codec!\n");
-		return -1;
-	}
-
-	uint64_t out_channel_layout = 0;
-	int out_channels = 0;
-	int out_nb_samples = 0;
-	int out_sample_rate = 0;
-	int64_t in_channel_layout = 0;
-	switch (codecCtx->codec_type) {
-		//	 音频流参数配置，打开音频设备，播放音频
-	case AVMEDIA_TYPE_AUDIO:
-		// Set audio settings from codec info
-		wanted_spec.freq = codecCtx->sample_rate;
+		//SDL_AudioSpec
+		SDL_AudioSpec wanted_spec;
+		wanted_spec.freq = out_sample_rate;
 		wanted_spec.format = AUDIO_S16SYS;
-		wanted_spec.channels = 2;//codecCtx->channels;
+		wanted_spec.channels = out_channels;
 		wanted_spec.silence = 0;
-		wanted_spec.samples = SDL_AUDIO_BUFFER_SIZE;
-		wanted_spec.callback = audio_callback;
-		wanted_spec.userdata = is;
+		wanted_spec.samples = out_nb_samples;
+		wanted_spec.callback = SDL_AudioCallPlay;
+		wanted_spec.userdata = pThis;
 
-		fprintf(stderr, "wanted spec: channels:%d, sample_fmt:%d, sample_rate:%d \n",
-			2, AUDIO_S16SYS, codecCtx->sample_rate);
-
-		//	 打开音频设备
-		if (SDL_OpenAudio(&wanted_spec, NULL) < 0) {
-			fprintf(stderr, "SDL_OpenAudio: %s\n", SDL_GetError());
-			return -1;
+		if (SDL_OpenAudio(&wanted_spec, NULL) < 0)
+		{
+			//pThis->PostMessageW(WM_ERROR_MSG, EM_SDL_OPENAUDIO_ERROR);
+			break;
 		}
 
-		is->audioStream = stream_index;
-		is->audio_st = pFormatCtx->streams[stream_index];
-		is->audio_ctx = codecCtx;
-		is->audio_buf_size = 0;
-
-		is->audio_buf_index = 0;
-		memset(&is->audio_pkt, 0, sizeof(is->audio_pkt));
-		packet_queue_init(&is->audioq);
-
-		//	Out Audio Param
-			//uint64_t out_channel_layout = AV_CH_LAYOUT_STEREO;
-
-			//int out_nb_samples = is->audio_ctx->frame_size;
-
-			//int out_sample_rate = is->audio_ctx->sample_rate;
-			//int out_channels = av_get_channel_layout_nb_channels(out_channel_layout);
-
-
-			//int64_t in_channel_layout = av_get_default_channel_layout(is->audio_ctx->channels);
-		SetValue(is->audio_ctx, out_channel_layout, out_nb_samples, out_sample_rate, out_channels, in_channel_layout);
-
-		//	 音频重采样
-		struct SwrContext *audio_convert_ctx;
-		audio_convert_ctx = swr_alloc();
-		swr_alloc_set_opts(audio_convert_ctx,
-			out_channel_layout,
-			AV_SAMPLE_FMT_S16,
+		//Swr
+		struct SwrContext *au_convert_ctx;
+		au_convert_ctx = swr_alloc();
+		au_convert_ctx = swr_alloc_set_opts(
+			au_convert_ctx,
+			out_ch_layout,
+			out_sample_fmt,
 			out_sample_rate,
-			in_channel_layout,
-			is->audio_ctx->sample_fmt,
-			is->audio_ctx->sample_rate,
+			in_ch_layout,
+			pThis->m_paCodecCtx->sample_fmt,
+			pThis->m_paCodecCtx->sample_rate,
 			0,
 			NULL);
+		swr_init(au_convert_ctx);
 
-		swr_init(audio_convert_ctx);
-		is->audio_swr_ctx = audio_convert_ctx;
-
-		//	 开始播放音频，audio_callback回调
+		//Play
 		SDL_PauseAudio(0);
 
-		break;
-		//	 视频播放准备，解码、播放视频
-	case AVMEDIA_TYPE_VIDEO:
-		is->videoStream = stream_index;
-		is->video_st = pFormatCtx->streams[stream_index];
-		is->video_ctx = codecCtx;
+		int ret = 0;
+		AVPacket packet;
+		uint8_t *out_buffer = (uint8_t *)av_malloc(2 * out_sample_rate);
+		AVFrame* pFrame = av_frame_alloc();
 
-		is->frame_timer = (double)av_gettime() / 1000000.0;
-		is->frame_last_delay = 40e-3;
-		is->video_current_pts_time = av_gettime();
-
-		packet_queue_init(&is->videoq);
-
-		//	 创建视频解码线程
-		is->video_tid = SDL_CreateThread(decode_video_thread, "decode_video_thread", is);
-		break;
-	default:
-		break;
-	}
-	return 0;
-}
-
-// 解复用，获取音频、视频流，并将packet放入队列中
-int VideoFile::demux_thread(void *arg) {
-
-	int err_code;
-	char errors[1024] = { 0, };
-
-	int w, h;
-
-	VideoState *is = (VideoState *)arg;
-	AVFormatContext *pFormatCtx = NULL;
-	AVPacket pkt1, *packet = &pkt1;
-
-	int video_index = -1;
-	int audio_index = -1;
-	int i;
-
-	is->videoStream = -1;
-	is->audioStream = -1;
-
-	global_video_state = is;
-
-	/* open input file, and allocate format context */
-	if ((err_code = avformat_open_input(&pFormatCtx, is->filename, NULL, NULL)) < 0) {
-		av_strerror(err_code, errors, 1024);
-		fprintf(stderr, "Could not open source file %s, %d(%s)\n", is->filename, err_code, errors);
-		return -1;
-	}
-
-	is->pFormatCtx = pFormatCtx;
-
-	// Retrieve stream information
-	if (avformat_find_stream_info(pFormatCtx, NULL) < 0)
-		return -1; // Couldn't find stream information
-
-	// Dump information about file onto standard error
-	av_dump_format(pFormatCtx, 0, is->filename, 0);
-
-	// Find the first video stream
-	for (i = 0; i < pFormatCtx->nb_streams; i++) {
-		if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
-			video_index < 0) {
-			video_index = i;
-		}
-		if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO &&
-			audio_index < 0) {
-			audio_index = i;
-		}
-	}
-	if (audio_index >= 0) {
-		stream_component_open(is, audio_index);
-	}
-	if (video_index >= 0) {
-		stream_component_open(is, video_index);
-	}
-
-	if (is->videoStream < 0 || is->audioStream < 0) {
-		fprintf(stderr, "%s: could not open codecs\n", is->filename);
-		goto fail;
-	}
-
-	screen_width = is->video_ctx->width;
-	screen_height = is->video_ctx->height;
-
-
-	for (;;) {
-		if (is->quit) {
-			break;
-		}
-		// seek stuff goes here
-		if (is->audioq.size > MAX_AUDIOQ_SIZE ||
-			is->videoq.size > MAX_VIDEOQ_SIZE) {
-			SDL_Delay(10);
-			continue;
-		}
-		if (av_read_frame(is->pFormatCtx, packet) < 0) {
-			if (is->pFormatCtx->pb->error == 0) {
-				SDL_Delay(100); /* no error; wait for user input */
-				continue;
-			}
-			else {
+		while (true)
+		{
+			SetEvent(pThis->m_hAudioEvent);
+			WaitForSingleObject(pThis->m_hSupendEvent, INFINITE);
+			ResetEvent(pThis->m_hAudioEvent);
+			if (pThis->GetPlayType() == EM_PLAY_TYPE_STOP)
+			{
+				av_seek_frame(pThis->m_pFormatCtx, pThis->m_AudioStream, 0, AVSEEK_FLAG_BACKWARD);
 				break;
 			}
-		}
-		// Is this a packet from the video stream?
-		if (packet->stream_index == is->videoStream) {
-			packet_queue_put(&is->videoq, packet);
-		}
-		else if (packet->stream_index == is->audioStream) {
-			packet_queue_put(&is->audioq, packet);
-		}
-		else {
-			av_packet_unref(packet);
-		}
-	}
-	/* all done - wait for it */
-	while (!is->quit) {
-		SDL_Delay(100);
-	}
-
-fail:
-	if (1) {
-		SDL_Event event;
-		event.type = FF_QUIT_EVENT;
-		event.user.data1 = is;
-		SDL_PushEvent(&event);
-	}
-	return 0;
-}
-
-size_t VideoFile::my_strlcpy(char *des, const char *src, size_t length)
-{
-	int i = 0;
-	for (i = 0; src[i] != '\0' && i < length - 1; i++)
-	{
-		des[i] = src[i];
-
-	}
-	des[i] = '\0';
-	return strlen(src);
-}
-
-int VideoFile::ShowVideo() {
-
-	char *file = filePath;
-
-	SDL_Event event;
-
-	VideoState *is;
-
-	is = (VideoState*)av_mallocz(sizeof(VideoState));//为VideoState分配空间
-
-	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) {
-		fprintf(stderr, "Could not initialize SDL - %s\n", SDL_GetError());
-		exit(1);
-	}
-
-	win = SDL_CreateWindowFrom(
-		videoWnd->GetSafeHwnd()
-	);
-
-	if (!win) {
-		fprintf(stderr, "\nSDL: could not set video mode:%s - exiting\n", SDL_GetError());
-		exit(1);
-	}
-
-	renderer = SDL_CreateRenderer(win, -1, 0);
-	text_mutex = SDL_CreateMutex();	//创建线程互斥锁
-	my_strlcpy(is->filename, file, sizeof(is->filename));//将视频名字copy给VideoState的filename
-	is->pictq_mutex = SDL_CreateMutex();
-	is->pictq_cond = SDL_CreateCond();	//条件变量
-
-	// 定时刷新器
-	schedule_refresh(is, 40);
-
-	// 创建解复用线程
-	is->parse_tid = SDL_CreateThread(demux_thread, "demux_thread", is);
-	if (!is->parse_tid) {
-		av_free(is);
-		return -1;
-	}
 
 
-	for (;;) {
-		// 等待SDL事件，否则阻塞
-		SDL_WaitEvent(&event);
-		switch (event.type) {
-		case FF_QUIT_EVENT:
-		//case SDL_QUIT: // 退出
-		//	is->quit = 1;
-		//	SDL_Quit();
-		//	return 0;
-		case SDL_KEYDOWN:
-			if (event.key.keysym.sym == SDLK_ESCAPE) {
-				is->quit = 1;
-				SDL_Quit();
-				return 0;
+			AVPacket* packet = nullptr;
+			{
+				std::lock_guard<mutex> mtx_locker(pThis->m_AMutex);
+				if (!pThis->m_AList.empty())
+				{
+					packet = &pThis->m_AList.front();
+					if (packet->buf == NULL)
+					{
+						av_free_packet(packet);
+						pThis->m_AList.pop_front();
+						continue;
+					}
+				}
+				else
+					continue;
 			}
-			break;
-		case FF_REFRESH_EVENT: // 定时器刷新事件
-			video_refresh_timer(event.user.data1);
-			break;
-		default:
-			break;
+
+			ret = avcodec_send_packet(pThis->m_paCodecCtx, packet);
+			if (ret < 0)
+			{
+				//pThis->PostMessage(WM_ERROR_MSG, NULL, EM_SEND_PACKET_ERROR);
+				break;
+			}
+			while (ret >= 0)
+			{
+				ret = avcodec_receive_frame(pThis->m_paCodecCtx, pFrame);
+				if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+				{
+					break;
+				}
+				else if (ret < 0)
+					continue;
+				else
+				{
+					int nRet = swr_convert(au_convert_ctx, &out_buffer, 2 * out_sample_rate, (const uint8_t**)pFrame->data, pFrame->nb_samples);
+					int buf_len = nRet * out_channels * GetSampleCount(out_sample_fmt);
+
+					ST_ABUF st_buf;
+					st_buf.buf = new Uint8[2 * out_sample_rate];
+					memset(st_buf.buf, 0, 2 * out_sample_rate);
+					memcpy(st_buf.buf, out_buffer, buf_len);
+					st_buf.buf_len = buf_len;
+					st_buf.pts = packet->pts > 0 ? packet->pts : packet->dts;
+
+					//将解码的音频数据放入队列
+					std::lock_guard<mutex> mtx_locker(pThis->m_CMutex);
+					pThis->m_qAbuf.push(st_buf);
+				}
+			}
+
+			av_free_packet(packet);
+			std::lock_guard<mutex> mtx_locker(pThis->m_AMutex);
+			pThis->m_AList.pop_front();
 		}
-	}
-
-	SDL_Quit();
+		av_free(out_buffer);
+		SDL_CloseAudio();
+		swr_free(&au_convert_ctx);
+	} while (0);
 	return 0;
-
 }
